@@ -1,0 +1,14 @@
+services:
+  dataagents:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - dataagents-data:/var/lib/dataagents
+    environment:
+      DATAAGENTS_DATABASE_PATH: /var/lib/dataagents/dataagents.db
+    restart: unless-stopped
+
+volumes:
+  dataagents-data:
