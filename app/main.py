@@ -3,15 +3,17 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.connectors.mcp import McpConnector
-from app.connectors.rest import RestConnector
 from app.db import connection, initialize, json_dump, now, unpack
 from app.schemas import (
+    AgentRun,
+    AgentRunRequest,
     IngestRequest,
     PipelineRun,
     PipelineRunRequest,
@@ -21,7 +23,9 @@ from app.schemas import (
     RuleCreate,
     Source,
     SourceCreate,
+    ToolDescriptor,
 )
+from app.services.agent_runtime import TOOL_CATALOG, AgentRuntime, source_by_id, sync_source
 from app.services.insights import summarize
 from app.services.orchestration import get_run, run_pipeline
 from app.services.records import insert_records, query_records
@@ -103,25 +107,36 @@ def ingest(source_id: str, payload: IngestRequest):
 
 @app.post("/v1/sources/{source_id}/sync", dependencies=[Auth])
 def sync(source_id: str):
-    with connection() as con:
-        row = con.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "Source not found")
-    source = unpack(row)
-    if source["kind"] == "webhook":
-        raise HTTPException(400, "Webhook sources receive data through /ingest")
     try:
-        connector = (
-            RestConnector(source["config"])
-            if source["kind"] == "rest"
-            else McpConnector(source["config"])
-        )
-        inserted = insert_records(source_id, connector.fetch())
-        with connection() as con:
-            con.execute("UPDATE sources SET last_synced_at = ? WHERE id = ?", (now(), source_id))
-        return {"source_id": source_id, "inserted": inserted}
-    except Exception as exc:
+        result = sync_source(source_id)
+        if result["status"] == "skipped":
+            raise HTTPException(400, result["detail"])
+        return {"source_id": source_id, "inserted": result["records_stored"]}
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise HTTPException(502, f"Source sync failed: {exc}") from exc
+
+
+@app.get("/v1/tools", response_model=list[ToolDescriptor], dependencies=[Auth])
+def list_tools():
+    return list(TOOL_CATALOG.values())
+
+
+@app.post("/v1/sources/{source_id}/discover-tools", dependencies=[Auth])
+def discover_source_tools(source_id: str):
+    source = source_by_id(source_id)
+    if not source:
+        raise HTTPException(404, "Source not found")
+    if source["kind"] != "mcp":
+        raise HTTPException(400, "Tool discovery is available only for MCP sources")
+    try:
+        tools = McpConnector(source["config"]).discover_tools()
+        return {
+            "source_id": source_id,
+            "allowed_tools": source["config"].get("allowed_tools", []),
+            "discovered_tools": tools,
+        }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(502, f"MCP tool discovery failed: {exc}") from exc
 
 
 @app.post("/v1/rules", response_model=Rule, dependencies=[Auth])
@@ -213,6 +228,46 @@ def create_report(payload: ReportRequest):
 @app.post("/v1/runs", response_model=PipelineRun, dependencies=[Auth])
 def create_pipeline_run(payload: PipelineRunRequest):
     return run_pipeline(payload.source_ids, payload.report_title, payload.create_report)
+
+
+@app.post("/v1/agent/runs", response_model=AgentRun, dependencies=[Auth])
+def create_agent_run(payload: AgentRunRequest):
+    return AgentRuntime(payload.allowed_tools, payload.source_ids).run(
+        payload.objective, payload.report_title
+    )
+
+
+@app.get("/v1/agent/runs/{agent_run_id}", response_model=AgentRun, dependencies=[Auth])
+def get_agent_run(agent_run_id: str):
+    with connection() as con:
+        row = con.execute(
+            "SELECT result_json FROM agent_runs WHERE id = ?", (agent_run_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Agent run not found")
+    return json.loads(row["result_json"])
+
+
+@app.get("/v1/agent/runs/{agent_run_id}/tool-calls", dependencies=[Auth])
+def get_agent_tool_calls(agent_run_id: str):
+    with connection() as con:
+        rows = con.execute(
+            "SELECT id, tool_name, source_id, status, input_json, output_json, started_at, completed_at FROM tool_calls WHERE agent_run_id = ? ORDER BY started_at",
+            (agent_run_id,),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "tool_name": row["tool_name"],
+            "source_id": row["source_id"],
+            "status": row["status"],
+            "input": json.loads(row["input_json"]),
+            "output": json.loads(row["output_json"]),
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+        }
+        for row in rows
+    ]
 
 
 @app.get("/v1/runs/{run_id}", response_model=PipelineRun, dependencies=[Auth])
