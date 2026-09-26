@@ -92,3 +92,35 @@ class PipelineRun(BaseModel):
     report_id: str | None = None
     started_at: datetime
     completed_at: datetime
+
+
+class AgentRunRequest(BaseModel):
+    objective: str = Field(
+        default="Refresh permitted sources and generate an operations report",
+        min_length=8,
+        max_length=300,
+    )
+    source_ids: list[str] | None = None
+    report_title: str = "Agent operations report"
+    allowed_tools: list[Literal["source.sync", "report.generate"]] = Field(
+        default_factory=lambda: ["source.sync", "report.generate"]
+    )
+
+
+class ToolDescriptor(BaseModel):
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    read_only: bool
+    source_scoped: bool
+
+
+class AgentRun(BaseModel):
+    id: str
+    objective: str
+    status: Literal["completed", "completed_with_errors", "blocked"]
+    plan: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    report_id: str | None = None
+    started_at: datetime
+    completed_at: datetime
