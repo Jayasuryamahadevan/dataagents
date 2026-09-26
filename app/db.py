@@ -52,6 +52,17 @@ def initialize() -> None:
               id TEXT PRIMARY KEY, status TEXT NOT NULL, events_json TEXT NOT NULL,
               report_id TEXT, started_at TEXT NOT NULL, completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS agent_runs (
+              id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL,
+              plan_json TEXT NOT NULL, result_json TEXT NOT NULL,
+              started_at TEXT NOT NULL, completed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tool_calls (
+              id TEXT PRIMARY KEY, agent_run_id TEXT, tool_name TEXT NOT NULL,
+              source_id TEXT, status TEXT NOT NULL, input_json TEXT NOT NULL,
+              output_json TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS tool_calls_agent_run_idx ON tool_calls(agent_run_id);
             """
         )
 
