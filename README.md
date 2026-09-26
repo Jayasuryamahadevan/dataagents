@@ -10,6 +10,27 @@ DataAgents is a script-first orchestration service for operational data. It conn
 - Cloud ready: FastAPI, SQLite volume by default, Docker image, stateless API process apart from the database volume.
 - AI optional: external AI can consume the generated report later, but it is not in the control path.
 
+## Tool-based agent runtime
+
+The agent runtime does not give an LLM unrestricted access to connected systems. It creates a deterministic plan from an allowlisted tool catalog, validates every argument against a JSON schema, enforces the selected source scope, and persists every tool call with its input, output, and status.
+
+Available tools:
+
+- `source.sync` — read-only REST/MCP collection and normalization for one registered source.
+- `report.generate` — deterministic rule evaluation and immutable report creation.
+
+MCP sources use the standard initialize → initialized notification → `tools/list` / `tools/call` sequence. Configure `allowed_tools` on each MCP source so DataAgents rejects any non-approved external tool.
+
+```bash
+curl http://localhost:8080/v1/tools -H "X-API-Key: $API_KEY"
+
+curl -X POST http://localhost:8080/v1/agent/runs \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"objective":"Refresh permitted sources and generate an operations report","report_title":"Daily agent report","allowed_tools":["source.sync","report.generate"]}'
+```
+
+The response contains the plan and results. Use `/v1/agent/runs/AGENT_RUN_ID/tool-calls` for the execution ledger. MCP tool metadata can be inspected through `/v1/sources/SOURCE_ID/discover-tools` before selecting a tool in the source configuration.
+
 ## Run locally
 
 ```bash
@@ -82,6 +103,7 @@ MCP source:
   "config": {
     "url": "https://mcp.example.com/mcp",
     "tool": "list_inventory",
+    "allowed_tools": ["list_inventory"],
     "arguments": {"warehouse": "CBE-01"},
     "headers": {"Authorization": "Bearer use-a-secret-manager-in-production"}
   }
