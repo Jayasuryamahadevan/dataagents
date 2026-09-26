@@ -1,9 +1,11 @@
 import json
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.connectors.mcp import McpConnector
@@ -20,8 +22,9 @@ from app.schemas import (
     Source,
     SourceCreate,
 )
+from app.services.insights import summarize
 from app.services.orchestration import get_run, run_pipeline
-from app.services.records import insert_records
+from app.services.records import insert_records, query_records
 from app.services.reports import generate
 
 app = FastAPI(
@@ -36,6 +39,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+STATIC_DIRECTORY = Path(__file__).parent / "static"
 
 
 @app.on_event("startup")
@@ -55,6 +60,11 @@ Auth = Depends(authorized)
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "dataagents", "ai_required": False}
+
+
+@app.get("/", include_in_schema=False)
+def dashboard_page():
+    return FileResponse(STATIC_DIRECTORY / "index.html")
 
 
 @app.post("/v1/sources", response_model=Source, dependencies=[Auth])
@@ -142,6 +152,57 @@ def list_rules():
             unpack(row)
             for row in con.execute("SELECT * FROM rules ORDER BY created_at DESC").fetchall()
         ]
+
+
+@app.get("/v1/dashboard", dependencies=[Auth])
+def dashboard_data():
+    with connection() as con:
+        sources = [
+            unpack(row)
+            for row in con.execute(
+                "SELECT * FROM sources ORDER BY last_synced_at DESC, created_at DESC"
+            ).fetchall()
+        ]
+        rules = [
+            unpack(row)
+            for row in con.execute("SELECT * FROM rules ORDER BY created_at DESC").fetchall()
+        ]
+        report_rows = con.execute(
+            "SELECT id, title, created_at, data_json FROM reports ORDER BY created_at DESC LIMIT 6"
+        ).fetchall()
+        run_rows = con.execute(
+            "SELECT id, status, events_json, report_id, started_at, completed_at FROM runs ORDER BY started_at DESC LIMIT 4"
+        ).fetchall()
+    records = query_records()
+    reports = [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "summary": json.loads(row["data_json"])["summary"],
+            "insight_count": len(json.loads(row["data_json"]).get("insights", [])),
+        }
+        for row in report_rows
+    ]
+    runs = [
+        {
+            "id": row["id"],
+            "status": row["status"],
+            "events": json.loads(row["events_json"]),
+            "report_id": row["report_id"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+        }
+        for row in run_rows
+    ]
+    return {
+        "summary": summarize(records),
+        "sources": sources,
+        "rules": rules,
+        "reports": reports,
+        "runs": runs,
+        "generated_at": now(),
+    }
 
 
 @app.post("/v1/reports", response_model=Report, dependencies=[Auth])
